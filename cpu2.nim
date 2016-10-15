@@ -1,5 +1,9 @@
 import mem2, unsigned, os, strutils, opcodes, parseutils, utils, gpu2, tables
 import times, macros
+
+type ImeChange {.pure.} = enum
+      Now, Soon, None
+
 type
   CPU = ref object
     ## Registers
@@ -8,6 +12,7 @@ type
     mem: Memory
     ime: bool # Interrupt Master Enable Flag
     clock: int
+    imeChange: ImeChange
 
   OperandKind = enum
     Immediate, Address, Register, RegisterCombo, IntLit
@@ -50,6 +55,7 @@ proc newCPU(mem: Memory): CPU =
   result.mem = mem
   result.pc = 0
   result.ime = true
+  result.imeChange = ImeChange.None
 
 proc verifyFlags(cpu: CPU, opc: Opcode, prevFlags: uint8) =
   template assertInfo(cond: expr) =
@@ -739,6 +745,26 @@ proc genOr(result: NimNode) {.compileTime.} =
       cpu.f = cpu.f.changeFlags(z = >>(cpu.a == 0), h = FUnset, n = FUnset,
           c = FUnset)
 
+proc genCpl(result: NimNode) {.compileTime.} =
+  genGeneric(["CPL"], body, opcs):
+    #var reg = operandOne.createGet8()
+    body.add quote do:
+      cpu.a = cpu.a xor 0xFF
+      cpu.f = cpu.f.changeFlags(z = FUnset, h=FSet, n=FSet,
+          c = FUnset)
+
+
+proc genEi(result: NimNode) {.compileTime.} =
+  genGeneric(["EI"], body, opcs):
+    body.add quote do:
+      cpu.imeChange = ImeChange.Soon
+
+proc genDi(result: NimNode) {.compileTime.} =
+  genGeneric(["DI"], body, opcs):
+    body.add quote do:
+      cpu.ime = false
+      cpu.imeChange = ImeChange.None
+
 # --- Prefix CB opcodes start here ---
 
 proc genBit(result: NimNode) {.compileTime.} =
@@ -864,6 +890,24 @@ proc genRlcRlca(result: NimNode, rlca = false) {.compileTime.} =
           cpu.f.changeFlags(n = FUnset,
                             h = FUnset, c = >>`bit7Set`)
 
+proc genSwap(result: NimNode) {.compileTime.} =
+  genGeneric(["SWAP"], body, prefixOpcs):
+    let regRead = operandOne.createGet8()
+
+    let value = newIdentNode"value"
+    let bit0Set = newIdentNode"bit0Set"
+
+    body.add quote do:
+      var `value` = `regRead`
+      `value` = (`value` shr 4) or (`value` shl 4)
+
+    body.add createSet8(operandOne, value)
+
+    body.add quote do:
+      cpu.f = cpu.f.changeFlags(z = >>(`value` == 0), n = FUnset,
+                                h = FUnset, c = FUnset)
+
+
 proc genCb(result: NimNode) {.compileTime.} =
   genGeneric(["PREFIXCB"], body, opcs):
     var cbAddrIdent = newIdentNode("cbAddr")
@@ -874,10 +918,11 @@ proc genCb(result: NimNode) {.compileTime.} =
     genRrRra(caseStmt)
     genRlcRlca(caseStmt)
     genSrl(caseStmt)
+    genSwap(caseStmt)
 
     caseStmt.add(newNimNode(nnkElse).add(
       quote do:
-        assert false, "CB: " & `cbAddrIdent`.toHex() & ' ' & oldReg.pc.toHex()))
+        assert false, "CB: 0x" & `cbAddrIdent`.toHex() & ' ' & oldReg.pc.toHex()))
 
     body.add quote do:
       let prevFlags = cpu.f
@@ -913,19 +958,22 @@ macro genOpcodeLogic(): stmt =
   genCcf(result)
   genAnd(result)
   genOr(result)
+  genCpl(result)
   genCb(result)
-  result.add(
-    newNimNode(nnkOfBranch).add(newIntLitNode(0xF3),
-      quote do:
-        # DI
-        cpu.ime = false
-        cpu.clock.inc 4))
-  result.add(
-    newNimNode(nnkOfBranch).add(newIntLitNode(0xFC),
-      quote do:
-        # EI
-        cpu.ime = true
-        cpu.clock.inc 4))
+  genEi(result)
+  genDi(result)
+  #result.add(
+  #  newNimNode(nnkOfBranch).add(newIntLitNode(0xF3),
+  #    quote do:
+  #      # DI
+  #      cpu.ime = false
+  #      cpu.clock.inc 4))
+  #result.add(
+  #  newNimNode(nnkOfBranch).add(newIntLitNode(0xFC),
+  #    quote do:
+  #      # EI
+  #      cpu.ime = true
+  #      cpu.clock.inc 4))
   result.add(
     newNimNode(nnkOfBranch).add(newIntLitNode(0x76),
       quote do:
@@ -942,7 +990,7 @@ macro genOpcodeLogic(): stmt =
 
   result.add(newNimNode(nnkElse).add(
     quote do:
-      assert false, "OPCS: " & opcodeAddr.toHex() & ' ' & oldReg.pc.toHex()))
+      assert false, "OPCS: 0x" & opcodeAddr.toHex() & ' ' & oldReg.pc.toHex()))
 
   #echo(result.toStrLit())
 
@@ -975,6 +1023,13 @@ proc echoRegDiff(oldReg, newReg: tuple[pc, sp: uint16, a, b, c, d,
     echodReg("L", oldReg.l, newReg.l)
 
 proc next(cpu: CPU) =
+  ##Check for IME Change
+  ##This is based on the way mooneye-gb does it
+  if cpu.imeChange == ImeChange.Soon:
+    cpu.imeChange = ImeChange.Now
+  elif cpu.imeChange == ImeChange.Now:
+    cpu.ime = true;
+    cpu.imeChange = ImeChange.None
   ## Executes the next opcode.
   cpu.clock = 0
   let prevFlags = cpu.f
@@ -1097,6 +1152,7 @@ proc main() =
           except:
             echo(getStackTrace())
             echo(getCurrentExceptionMsg())
+            echoCurrentOpcode(cpu)
             break cpuLoop
           if gpu.next(cpu.clock): break cpuLoop
           counter.inc cpu.clock
