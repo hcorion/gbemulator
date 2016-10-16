@@ -103,8 +103,8 @@ proc renderTile(gpu: GPU, tileNum: uint16, x, y: uint16) =
 
   let tileDataAddr = dataOffset + (tileNum * 16)
 
-  if tileNum == 16:
-    assert(tileDataAddr == 0x8100, tileDataAddr.toHex())
+  #if tileNum == 16:
+    #assert(tileDataAddr == 0x8100, tileDataAddr.toHex())
 
   for line in 0'u8 .. 7'u8:
     let lineDataLower = gpu.mem.read8(tileDataAddr + (line*2).uint16)
@@ -114,31 +114,7 @@ proc renderTile(gpu: GPU, tileNum: uint16, x, y: uint16) =
       let higher = (lineDataHigher shr (7'u8 - tileX)) and 1
       let colorNum = (higher shl 1) or lower
       gpu.surface[int(x + tileX), int(y + line)] = palette[colorNum]
-  
-proc renderSignedTile(gpu: GPU, tileNum: int16, x, y: uint16) =
-  let lcdc = getLCDC(gpu)
-  let palette = getPaletteBg(gpu)
 
-  let dataOffset: int =
-    if lcdc.winBgTileData: 0x8000
-    else: 0x8800
-
-  # TODO: 8800 tile numbers are signed!
-
-  let tileDataAddr = dataOffset + (tileNum+128 * 16)
-  #I have no idea what this line does. (This is Zion)
-  #if tileNum == 16:
-    #echo "really bad"
-    #assert(tileDataAddr == 33024, cast[uint16](tileDataAddr).toHex())
-
-  for line in 0 .. 7:
-    let lineDataLower = (int16)gpu.mem.read8(cast[uint16](tileDataAddr + (line*2)))
-    let lineDataHigher = (int16)gpu.mem.read8(cast[uint16](tileDataAddr + (line*2) + 1))
-    for tileX in 0 .. 7:
-      let lower = (lineDataLower shr (7 - tileX)) and 1
-      let higher = (lineDataHigher shr (7 - tileX)) and 1
-      let colorNum = (higher shl 1) or lower
-      gpu.surface[int(cast[int16](x) + tileX), int(cast[int16](y) + line)] = palette[colorNum]
 
 proc renderAll(gpu: GPU) =
   let lcdc = getLCDC(gpu)
@@ -154,12 +130,12 @@ proc renderAll(gpu: GPU) =
     for x in countup(0, 256 - 8, 8):
       let tileNumAddr = (y.uint16 * 4) + (x.uint16 div 8)
       #This is where the fancy schmancy signed int stuff goes.
-      let tileNum = gpu.mem.read8(mapOffset + tileNumAddr)
+      let tileNum =
+        if lcdc.winBgTileData: gpu.mem.read8(mapOffset + tileNumAddr)
+        else: gpu.mem.read8(mapOffset + tileNumAddr + 128)
       #assert(lcdc.winBgTileData)
-      if lcdc.winBgTileData == true:
-        renderTile(gpu, tileNum, x.uint16, y.uint16)
-      else:
-        renderSignedTile(gpu, cast[int8](tileNum), x.uint16, y.uint16)
+
+      renderTile(gpu, tileNum, x.uint16, y.uint16)
 
 
   let scrollY = gpu.mem.read8(0xFF42)

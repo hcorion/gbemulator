@@ -186,6 +186,8 @@ proc parseOperandCT(encoded: string): Operand =
     result = Operand(name: "(BC)", kind: Address, opName: "BC", word: true)
   of "0", "1", "2", "3", "4", "5", "6", "7":
     result = Operand(name: encoded, kind: IntLit, num: encoded.parseInt())
+  of "00H", "08H", "10H", "18H", "20H", "28H", "30H", "38H":
+    discard
   else:
     assert false, "Unknown operand: " & encoded.toUpper()
 
@@ -750,8 +752,7 @@ proc genCpl(result: NimNode) {.compileTime.} =
     #var reg = operandOne.createGet8()
     body.add quote do:
       cpu.a = cpu.a xor 0xFF
-      cpu.f = cpu.f.changeFlags(z = FUnset, h=FSet, n=FSet,
-          c = FUnset)
+      cpu.f = cpu.f.changeFlags(h=FSet, n=FSet)
 
 
 proc genEi(result: NimNode) {.compileTime.} =
@@ -764,6 +765,28 @@ proc genDi(result: NimNode) {.compileTime.} =
     body.add quote do:
       cpu.ime = false
       cpu.imeChange = ImeChange.None
+
+proc genRst(result: NimNode) {.compileTime.} =
+  genGeneric(["RST"], body, opcs):
+    var num = opc.operandOne.replace("H", "").parseInt() + 100
+    let cycles = newIntLitNode(opc.cycles)
+    var stackPop = newStmtList()
+    body.add quote do:
+      #pushStack(pc);
+      cpu.sp.dec
+      cpu.mem.write8(cpu.sp and 0xffff, uint8(cpu.pc shr 8))
+      cpu.sp.dec
+      cpu.mem.write8(cpu.sp and 0xffff, uint8((cpu.pc and 0xff)))
+
+      #cpu.pc = location
+
+      cpu.pc = `value`
+      #cpu.clock.inc `cycles`
+      #execCallLoc(cpu, `num`)
+      execCallLoc(cpu, `num`)
+      #cpu.pc = `num`
+
+
 
 # --- Prefix CB opcodes start here ---
 
@@ -962,6 +985,7 @@ macro genOpcodeLogic(): stmt =
   genCb(result)
   genEi(result)
   genDi(result)
+  genRst(result)
   #result.add(
   #  newNimNode(nnkOfBranch).add(newIntLitNode(0xF3),
   #    quote do:
