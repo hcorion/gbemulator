@@ -132,7 +132,7 @@ proc renderAll(gpu: GPU) =
       #This is where the fancy schmancy signed int stuff goes.
       let tileNum =
         if lcdc.winBgTileData: gpu.mem.read8(mapOffset + tileNumAddr)
-        else: gpu.mem.read8(mapOffset + tileNumAddr + 128)
+        else: gpu.mem.read8(mapOffset + tileNumAddr)
       #assert(lcdc.winBgTileData)
 
       renderTile(gpu, tileNum, x.uint16, y.uint16)

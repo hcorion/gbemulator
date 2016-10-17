@@ -11,6 +11,7 @@ type
     a, b, c, d, e, h, l, f: uint8
     mem: Memory
     ime: bool # Interrupt Master Enable Flag
+    PCJumped: bool
     clock: int
     imeChange: ImeChange
 
@@ -56,6 +57,7 @@ proc newCPU(mem: Memory): CPU =
   result.pc = 0
   result.ime = true
   result.imeChange = ImeChange.None
+  result.PCJumped = false
 
 proc verifyFlags(cpu: CPU, opc: Opcode, prevFlags: uint8) =
   template assertInfo(cond: expr) =
@@ -496,6 +498,7 @@ proc genJr(result: NimNode) {.compileTime.} =
       let cycles = newIntLitNode(opc.cycles)
       let idleCycles = newIntLitNode(opc.idleCycles)
       body.add quote do:
+        cpu.PCJumped = true
         if `cond`:
           cpu.pc = `addition`
           cpu.clock.inc `cycles`
@@ -505,6 +508,7 @@ proc genJr(result: NimNode) {.compileTime.} =
       let addition = createAdd(operandOne, parseOperandCT("PC"))
       body.add quote do:
         cpu.pc = `addition`
+        cpu.PCJumped = true
 
     # Apparently "The assembler automatically adjusts for the twice
     # incremented PC."
@@ -514,6 +518,8 @@ proc genJp(result: NimNode) {.compileTime.} =
     if operandTwo == nil:
       let dest = parseOperandCT("PC")
       body.add createSet16(dest, createGet16(operandOne))
+      body.add quote do:
+        cpu.PCJumped = true
     else:
       let cond = createCond(operandOne)
       let newPc = createGet16(operandTwo)
@@ -525,6 +531,7 @@ proc genJp(result: NimNode) {.compileTime.} =
           cpu.clock.inc `cycles`
         else:
           cpu.clock.inc `idleCycles`
+        cpu.PCJumped = true
 
     operandOne = nil
     operandTwo = nil
@@ -583,7 +590,9 @@ proc genCall(result: NimNode) {.compileTime.} =
         let `locationIdent` = `location`
       body.add createPcInc(operandOne)
 
-      body.add quote do: execCallLoc(cpu, `locationIdent`)
+      body.add quote do: 
+        execCallLoc(cpu, `locationIdent`)
+        cpu.PCJumped = true
     else:
       let cond = createCond(operandOne)
       let location = createGet16(operandTwo)
@@ -594,6 +603,7 @@ proc genCall(result: NimNode) {.compileTime.} =
       body.add createPcInc(operandOne)
       body.add createPcInc(operandTwo)
       body.add quote do:
+        cpu.PCJumped = true
         if `cond`:
           execCallLoc(cpu, `locationIdent`)
           cpu.clock.inc `cycles`
@@ -639,6 +649,7 @@ proc genRet(result: NimNode) {.compileTime.} =
 
       body.add quote do:
         cpu.pc =  `value`
+        cpu.PCJumped = true
     else:
       let cond = createCond(operandOne)
       let cycles = newIntLitNode(opc.cycles)
@@ -647,6 +658,7 @@ proc genRet(result: NimNode) {.compileTime.} =
       let (high, low, value) = genPopGeneric(stackPop)
 
       body.add quote do:
+        cpu.PCJumped = true
         if `cond`:
           `stackPop`
           cpu.pc = `value`
@@ -768,22 +780,53 @@ proc genDi(result: NimNode) {.compileTime.} =
 
 proc genRst(result: NimNode) {.compileTime.} =
   genGeneric(["RST"], body, opcs):
-    var num = opc.operandOne.replace("H", "").parseInt() + 100
+    #var num = opc.operandOne.replace("H", "").parseInt()
+    var newNum: uint16
+    case opc.operandOne:
+      of "00H":
+        newNum = 0x00
+      of "08H":
+        newNum = 0x08
+      of "10H":
+        newNum = 0x10
+      of "18H":
+        newNum = 0x18
+      of "20H":
+        newNum = 0x20
+      of "28H":
+        newNum = 0x28
+      of "30H":
+        newNum = 0x30
+      of "38H":
+        newNum = 0x38
+      else:
+        newNum = 0x00
     let cycles = newIntLitNode(opc.cycles)
     var stackPop = newStmtList()
     body.add quote do:
       #pushStack(pc);
-      cpu.sp.dec
-      cpu.mem.write8(cpu.sp and 0xffff, uint8(cpu.pc shr 8))
-      cpu.sp.dec
-      cpu.mem.write8(cpu.sp and 0xffff, uint8((cpu.pc and 0xff)))
+      execCallLoc(cpu, `newNum`)
+      cpu.PCJumped = true
+      #execCallLoc(cpu, cpu.pc+1)
+      #cpu.sp.inc
+      #cpu.sp.inc
+      #cpu.mem.write8(cpu.sp, `newNum`)
+      #cpu.pc = `newNum`
+      #echo "newNum: ", `newNum`
+      #echo "opc.operandOne:", `opc.operandOne`
+      #discard stdin.readline
+      
+      #cpu.sp.dec
+      #cpu.mem.write8(cpu.sp and 0xffff, uint8(cpu.pc shr 8))
+      #cpu.sp.dec
+      #cpu.mem.write8(cpu.sp and 0xffff, uint8((cpu.pc and 0xff)))
 
       #cpu.pc = location
 
-      cpu.pc = `value`
+      #cpu.pc = `newNum`
       #cpu.clock.inc `cycles`
       #execCallLoc(cpu, `num`)
-      execCallLoc(cpu, `num`)
+      #execCallLoc(cpu, `num`)
       #cpu.pc = `num`
 
 
@@ -1060,7 +1103,11 @@ proc next(cpu: CPU) =
   let opcodeAddr = cpu.mem.read8(cpu.pc)
   let opcode = opcs[opcodeAddr]
   let oldReg = saveRegisters(cpu)
-  cpu.pc.inc
+  if not cpu.PCJumped:
+    cpu.pc.inc
+  else:
+    cpu.PCJumped = false
+  
   genOpcodeLogic()
 
   echoRegDiff(oldReg, saveRegisters(cpu))
@@ -1126,7 +1173,7 @@ proc echoMem(cpu: CPU) =
 
 proc main() =
   var mem = newMemory()
-  mem.loadFile(getCurrentDir() / "tetris.gb", getCurrentDir() / "bios.gb")
+  mem.loadFile(getCurrentDir() / "drmario.gb", getCurrentDir() / "bios.gb")
   var cpu = newCPU(mem)
   cpu.sp = 0xFFFE
   #cpu.pc = 0x100
